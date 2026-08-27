@@ -4,6 +4,8 @@
 
 专为 `onprs.online` 打造，支持全域通配收信、安全出站中继与全客户端无缝支持。
 
+> 📦 **线上仓库**：`https://github.com/onprs/OnprsEmail.git`（公开只读，默认分支 `main`）
+
 ---
 
 ## 🌟 核心特性与架构
@@ -56,6 +58,18 @@ Onprs_Email/
 ---
 
 ## 🚀 快速启动与运维
+
+### 本地克隆
+
+```bash
+# HTTPS 方式（需代理）
+git clone https://github.com/onprs/OnprsEmail.git
+
+# SSH 方式
+git clone git@github.com:onprs/OnprsEmail.git
+```
+
+### 服务器部署
 
 在服务器（`sub2api_tokyo`）目录 `/opt/onprs-email` 执行：
 
