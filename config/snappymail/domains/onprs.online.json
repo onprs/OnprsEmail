@@ -1,0 +1,79 @@
+{
+    "IMAP": {
+        "host": "stalwart",
+        "port": 993,
+        "type": 1,
+        "timeout": 300,
+        "shortLogin": false,
+        "lowerLogin": true,
+        "sasl": [
+            "PLAIN",
+            "LOGIN"
+        ],
+        "ssl": {
+            "verify_peer": false,
+            "verify_peer_name": false,
+            "allow_self_signed": true,
+            "SNI_enabled": false,
+            "disable_compression": true,
+            "security_level": 1
+        },
+        "disabled_capabilities": [
+            "METADATA",
+            "OBJECTID",
+            "PREVIEW",
+            "STATUS=SIZE"
+        ],
+        "use_expunge_all_on_delete": false,
+        "fast_simple_search": true,
+        "force_select": false,
+        "message_all_headers": false,
+        "message_list_limit": 10000,
+        "search_filter": ""
+    },
+    "SMTP": {
+        "host": "stalwart",
+        "port": 465,
+        "type": 1,
+        "timeout": 60,
+        "shortLogin": false,
+        "lowerLogin": true,
+        "sasl": [
+            "PLAIN",
+            "LOGIN"
+        ],
+        "ssl": {
+            "verify_peer": false,
+            "verify_peer_name": false,
+            "allow_self_signed": true,
+            "SNI_enabled": false,
+            "disable_compression": true,
+            "security_level": 1
+        },
+        "useAuth": true,
+        "setSender": false,
+        "usePhpMail": false
+    },
+    "Sieve": {
+        "host": "stalwart",
+        "port": 4190,
+        "type": 0,
+        "timeout": 10,
+        "shortLogin": false,
+        "lowerLogin": true,
+        "sasl": [
+            "PLAIN",
+            "LOGIN"
+        ],
+        "ssl": {
+            "verify_peer": false,
+            "verify_peer_name": false,
+            "allow_self_signed": true,
+            "SNI_enabled": false,
+            "disable_compression": true,
+            "security_level": 1
+        },
+        "enabled": false
+    },
+    "whiteList": ""
+}
