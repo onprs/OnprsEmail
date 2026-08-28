@@ -2,8 +2,6 @@
 
 Onprs Email 是面向 `onprs.online` 的自托管邮件服务仓库。项目组合 Stalwart Mail Server、SnappyMail、Cloudflare Email Routing 和自研 Ingress 服务，在服务器无法使用公网 TCP 25 端口的条件下完成收信、客户端访问和出站中继。
 
-线上仓库：<https://github.com/onprs/OnprsEmail.git>，默认分支为 `main`。
-
 ## 架构
 
 入站邮件采用以下链路：
