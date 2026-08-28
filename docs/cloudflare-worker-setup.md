@@ -1,54 +1,56 @@
-# Cloudflare Email Worker (Catch-all 通配规则) 配置指南
+# Cloudflare Email Worker 配置
 
-本方案使用 Cloudflare Email Routing 的 **Catch-all（全域通配规则）** 配合 **Email Worker**，将发往 `*@onprs.online` 的所有邮件自动、无损、秒级直投到自建 Stalwart 邮件服务器中。
+Cloudflare Email Routing 接收发往 `@onprs.online` 的邮件，并通过 Email Worker 将邮件转发到 Ingress HTTPS 接口。该链路用于绕过服务器公网 TCP 25 入站限制。
 
----
+## 数据流与边界
 
-## 🌟 核心优势
+Worker 将发件人、收件人和 RFC 822 邮件内容组成 JSON 请求，并使用 Ingress 密钥鉴权。Ingress 收到请求后先写入 SQLite，再尝试通过内部 SMTP 投递至 Stalwart。
 
-- **一次配置，终身通用**：无需为每个新邮箱单独配置转发规则；任何新建账号（如 `admin@`、`onprs@`、`service@` 等）均自动生效。
-- **免 25 端口依赖**：彻底摆脱 VPS 厂商拦截 25 端口的限制。
-- **云端原生防护**：自动享受 Cloudflare 提供的 DDoS 防护与反垃圾邮件第一道过滤。
+当前 Worker 使用 UTF-8 文本序列化原始邮件，不应表述为逐字节无损传输。上线前需要用实际业务中的非 ASCII 正文、常见附件和接近大小上限的邮件验证兼容性。
 
----
+## 创建 Worker
 
-## 📋 三步完成通用配置
+1. 在 Cloudflare 控制台进入 **Workers & Pages**。
+2. 创建一个 Worker，并使用仓库中的 `cloudflare-worker/worker.js` 替换默认代码。
+3. 部署 Worker。
 
-### 第一步：创建 Cloudflare Email Worker
+Worker 名称只用于 Cloudflare 控制台识别，不影响服务端接口。
 
-1. 登录 Cloudflare 控制台 -> 点击左侧导航栏 **Workers & Pages** -> **Create application** -> **Create Worker**；
-2. 为 Worker 命名（例如 `onprs-email-worker`），点击 **Deploy（部署）**；
-3. 点击 **Edit code（编辑代码）**，将本仓库 `cloudflare-worker/worker.js` 中的全部代码粘贴进去；
-4. 点击 **Save and deploy（保存并部署）**。
+## 配置变量
 
----
+在 Worker 的 **Settings > Variables and Secrets** 中配置：
 
-### 第二步：配置 Worker 环境变量（Settings -> Variables）
+| 名称 | 类型 | 值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `INGRESS_URL` | 普通变量 | `https://mail.onprs.online/api/email-ingress` | Ingress 公开接收地址 |
+| `INGRESS_SECRET` | Secret | 与服务器 `.env` 的 `INGRESS_SECRET_KEY` 相同 | Ingress 密钥 |
 
-在刚创建的 Worker 详情页面，点击 **Settings** -> **Variables and Secrets**，添加以下环境变量：
+`INGRESS_SECRET` 不得保存为普通明文变量、写入代码或输出到日志。轮换密钥时，服务端与 Worker 需要协调更新；两端值不一致期间邮件会被拒绝。
 
-| 变量名 (Variable Name) | 变量值 (Value) | 说明 |
-| :--- | :--- | :--- |
-| **`INGRESS_URL`** | `https://mail.onprs.online/api/email-ingress` | 服务器通用接收接口地址 |
-| **`INGRESS_SECRET`** | `<服务器 .env 中的 INGRESS_SECRET_KEY>` | 使用 Cloudflare Secret 保存，不要作为明文变量公开 |
+## 启用 Catch-all
 
----
+1. 在 `onprs.online` 的 Cloudflare 控制台进入 **Email > Email Routing**。
+2. 确认 Email Routing 已启用，且根域 MX 为 Cloudflare 自动生成的三条记录。
+3. 编辑 Catch-all 规则，将操作设为 **Send to Worker**。
+4. 选择刚部署的 Worker 并启用规则。
 
-### 第三步：在域名中启用 Catch-all 规则
+不要把根域 MX 改为 `mail.onprs.online`。完整记录见 [DNS 配置](dns-setup.md)。
 
-1. 进入 Cloudflare 控制台 -> 选择你的域名 **`onprs.online`**；
-2. 左侧菜单点击 **Email（电子邮件）** -> **Email Routing（电子邮件路由）**；
-3. 进入 **Routing rules（路由规则）** 标签页：
-   - 找到 **Catch-all rule（通配所有地址规则）**；
-   - 点击 **Edit（编辑）**；
-   - **Action（操作）**：选择 **Send to Worker（发送至 Worker）**；
-   - **Destination（目标）**：选择第一步创建的 `onprs-email-worker`；
-   - 状态切换为 **Active（已启用）** 并保存。
-4. 切换到 **Overview** 页面，确认 Cloudflare 自动添加的 MX 解析记录已激活。
+## 验证
 
----
+1. 从域名外部的邮箱向一个已存在的 `@onprs.online` 账号发送测试邮件。
+2. 在 Cloudflare Worker 日志中确认请求获得 2xx 响应，且日志中没有响应体异常。
+3. 使用 Ingress v2 API 确认 SQLite 中存在该邮件。
+4. 使用 SnappyMail 或 IMAP 确认 Stalwart 中也存在该邮件。
+5. 使用带附件和非 ASCII 主题的测试邮件重复验证。
 
-## 🚀 验证测试
+Worker 获得 2xx 只表示 Ingress 已接受并处理请求，不单独证明内部 SMTP 投递成功。若邮件只出现在 Ingress API 中，应检查 `email-ingress-gateway` 日志和 Stalwart SMTP 状态。
 
-完成上述配置后：
-使用外部邮箱（如 QQ / 163 / Gmail）向 `*@onprs.online` 下的**任意已创建邮箱账号**发送一封邮件，邮件将瞬间直达你的 Stalwart 数据库并在 SnappyMail / IMAP 客户端中呈现！
+## 故障处理
+
+- `401`：核对 Worker `INGRESS_SECRET` 与服务器 `INGRESS_SECRET_KEY`。
+- `400`：检查请求大小和 Worker 生成的 JSON 字段。
+- `5xx`：检查 Ingress 容器、SQLite 数据目录和反向代理日志。
+- Worker 网络异常：确认 `INGRESS_URL` 的证书、DNS 和 Cloudflare 到源站的 HTTPS 连通性。
+
+处理期间不要在工单、聊天记录或公开日志中粘贴密钥和完整真实邮件。

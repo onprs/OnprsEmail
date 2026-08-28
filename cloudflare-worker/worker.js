@@ -1,28 +1,21 @@
 /**
- * Cloudflare Email Worker - 通用 Catch-all 邮件投递脚本
- * 
- * 功能：捕获发往域名下任意邮箱 (*@onprs.online) 的所有邮件，
- * 并通过安全的 HTTPS Webhook 直投到 Onprs Email 服务器。
+ * Cloudflare Email Worker：将 Catch-all 邮件转发至 Ingress HTTPS 接口。
  */
 
 export default {
-  async email(message, env, ctx) {
-    // 1. 获取发件人、收件人与原始邮件流 (RFC 822 / MIME)
+  async email(message, env) {
     const from = message.from;
     const to = message.to;
     const rawEmail = await new Response(message.raw).text();
-
-    // 2. 配置服务器接收端点与通信密钥
     const ingressUrl = env.INGRESS_URL || "https://mail.onprs.online/api/email-ingress";
     const ingressSecret = env.INGRESS_SECRET;
 
     if (!ingressSecret) {
-      console.error("缺少 INGRESS_SECRET Worker Secret，邮件未投递");
+      console.error("缺少 Ingress 密钥，邮件未转发");
       message.setReject("Email ingress is not configured");
       return;
     }
 
-    // 3. 将邮件打包并安全投递给自建邮件服务器
     try {
       const response = await fetch(ingressUrl, {
         method: "POST",
@@ -31,22 +24,24 @@ export default {
           "X-Ingress-Secret": ingressSecret,
         },
         body: JSON.stringify({
-          from: from,
-          to: to,
+          from,
+          to,
           raw: rawEmail,
         }),
       });
 
       if (!response.ok) {
-        const errorDetail = await response.text();
-        console.error(`邮件投递失败: HTTP ${response.status} - ${errorDetail}`);
+        const errorDetail = (await response.text()).slice(0, 500);
+        console.error(`邮件转发失败：HTTP ${response.status} - ${errorDetail}`);
         message.setReject(`Server rejected message: HTTP ${response.status}`);
-      } else {
-        console.log("邮件已成功投递至 Ingress 服务");
+        return;
       }
-    } catch (err) {
-      console.error(`网络请求异常: ${err.message}`);
-      message.setReject(`Delivery exception: ${err.message}`);
+
+      console.log("邮件已由 Ingress 接收");
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`邮件转发请求失败：${errorMessage}`);
+      message.setReject("Email ingress is temporarily unavailable");
     }
   },
 };

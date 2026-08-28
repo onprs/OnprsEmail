@@ -1,68 +1,73 @@
-# Onprs Email 域名 DNS 配置完整指南
+# DNS 配置
 
-本指南专为 `onprs.online` 域名（托管于 Cloudflare）定制，指导如何完整配置邮件收发与防垃圾邮件鉴权记录。
+本项目使用 Cloudflare Email Routing 接收邮件。根域 MX 必须指向 Cloudflare，而不是 `mail.onprs.online`；服务器公网 TCP 25 端口不可达时，后者会导致入站邮件无法送达。
 
----
+## 当前记录基线
 
-## 1. Cloudflare DNS 记录清单
+以下记录与项目既定架构一致。Cloudflare Email Routing 自动生成的 MX 值应以控制台实际显示为准，不要同时保留其他根域 MX。
 
-> ⚠️ **重要提示（Cloudflare 专属）**：  
-> 所有邮件相关的 A 记录（如 `mail`）在 Cloudflare 面板中**必须设置为 DNS Only（灰色云朵）**，绝对不能开启 Proxied（橙色云朵），否则非 HTTP 邮件协议（SMTP/IMAP）将无法连接！
-
-| 类型 | 主机名 / 名称 (Name) | 记录值 (Content / Value) | 代理状态 (Proxy Status) | 说明 |
+| 类型 | 名称 | 值 | 代理状态 | 用途 |
 | :--- | :--- | :--- | :--- | :--- |
-| **A** | `mail` | `155.117.155.11` | **DNS Only (仅 DNS)** | 邮件主机 IPv4 |
-| **AAAA** | `mail` | `2a12:bec0:167:1189::` | **DNS Only (仅 DNS)** | 邮件主机 IPv6 |
-| **MX** | `@` | `mail.onprs.online` (优先级 10) | - | 接收发往 `@onprs.online` 的邮件 |
-| **MX** | `mail` | `mail.onprs.online` (优先级 10) | - | 接收发往 `@mail.onprs.online` 的邮件 |
-| **TXT** | `@` | `v=spf1 mx ~all`（或包含 relay） | - | SPF 发信主体授权 |
-| **TXT** | `mail` | `v=spf1 mx ~all` | - | 子域名 SPF 授权 |
-| **TXT** | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:admin@onprs.online` | - | DMARC 保护策略 |
-| **TXT** | `stalwart._domainkey` | `v=DKIM1; k=rsa; p=<从 Stalwart 后台复制的公钥>` | - | DKIM 防篡改数字签名 |
+| `A` | `mail` | `155.117.155.11` | 仅 DNS | SMTP、IMAP 与管理入口 |
+| `A` | `use-mail` | `155.117.155.11` | 仅 DNS 或代理 | SnappyMail HTTPS 入口 |
+| `MX` | `@` | `route2.mx.cloudflare.net`，优先级 21 | 不适用 | Cloudflare Email Routing |
+| `MX` | `@` | `route1.mx.cloudflare.net`，优先级 25 | 不适用 | Cloudflare Email Routing |
+| `MX` | `@` | `route3.mx.cloudflare.net`，优先级 33 | 不适用 | Cloudflare Email Routing |
+| `TXT` | `@` | `v=spf1 include:_spf.mx.cloudflare.net ~all` | 不适用 | 当前 SPF 记录 |
+| `TXT` | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:admin@onprs.online` | 不适用 | DMARC 策略与聚合报告 |
 
----
+`mail` 必须保持“仅 DNS”，否则 Cloudflare 的普通 HTTP 代理无法转发 SMTP、IMAP、POP3 和 ManageSieve。`use-mail` 只承载 HTTPS，可按 OpenResty 和 Cloudflare 的实际配置选择代理状态。
 
-## 2. 详细配置说明
+服务器具有公网 IPv6 `2a12:bec0:167:1189::`，但 2026-08-28 的公开查询未发现 `mail.onprs.online` AAAA 记录。只有在实际验证 IPv6 入站路由、防火墙、PTR 和邮件协议证书后，才应发布对应 AAAA。
 
-### 2.1 SPF (Sender Policy Framework)
-- 作用：告诉全球邮件服务商，哪些服务器有权使用 `@onprs.online` 域发出邮件。
-- 基础配置：`v=spf1 mx ~all`
-- 搭配出站中继（以 Brevo 或 Resend 为例）：
-  - 若使用 Brevo：`v=spf1 mx include:spf.sendinblue.com ~all`
-  - 若使用 Resend：`v=spf1 mx include:resend.com ~all`
+## SPF
 
-### 2.2 DKIM (DomainKeys Identified Mail)
-1. 登录 Stalwart 管理后台（`https://mail.onprs.online` 或服务器本机的 `http://127.0.0.1:4080`）。
-2. 进入 **Management** -> **Directory** -> **Domains**，选择 `onprs.online`。
-3. 点击 **Signatures / DKIM** 生成 RSA 2048 密钥对，Selector 设为 `stalwart`。
-4. 复制生成的公钥 TXT 记录值，粘贴至 Cloudflare 的 `stalwart._domainkey` TXT 记录中。
+一个域名只能发布一条 SPF 记录。该记录必须合并所有实际发信来源：Cloudflare 转发、Stalwart 使用的 SMTP Relay，以及其他获准服务。不要把多个 `v=spf1` TXT 记录并列发布。
 
-### 2.3 DMARC (Domain-based Message Authentication)
-- 主机记录：`_dmarc`
-- TXT 记录值：`v=DMARC1; p=quarantine; sp=quarantine; pct=100; rua=mailto:admin@onprs.online`
-- 说明：
-  - `p=quarantine`：SPF 或 DKIM 鉴权失败时，将邮件标记为垃圾邮件并放入垃圾箱。
-  - `rua=mailto:...`：接收日度邮件鉴权聚合分析报告。
-
----
-
-## 3. DNS 生效验证
-
-在本地或终端执行以下命令验证解析状态：
+当前线上记录可通过以下命令读取：
 
 ```bash
-# 验证 A 记录
-dig +short mail.onprs.online A
-
-# 验证 MX 记录
-dig +short onprs.online MX
-
-# 验证 SPF
 dig +short onprs.online TXT
-
-# 验证 DKIM
-dig +short stalwart._domainkey.onprs.online TXT
-
-# 验证 DMARC
-dig +short _dmarc.onprs.online TXT
 ```
+
+启用或更换 SMTP Relay 后，按服务商给出的域名鉴权记录更新同一条 SPF，并确认最终查询结果没有超过 SPF 的 DNS 查询限制。`~all` 表示软失败，不应描述为严格拒绝策略。
+
+## DKIM
+
+DKIM 记录必须与实际执行签名的系统一致：
+
+- 由 Stalwart 签名时，在 Stalwart 中生成选择器和密钥，再发布其显示的 TXT 记录。
+- 由 SMTP Relay 签名时，按中继商要求发布 TXT 或 CNAME 记录。
+- 同时使用多个签名方时，每个选择器必须唯一。
+
+不要在未生成对应私钥和选择器前直接复制示例公钥。发布后检查完整记录，例如：
+
+```bash
+dig +short <selector>._domainkey.onprs.online TXT
+```
+
+## DMARC
+
+当前策略使用 `p=quarantine`。提高到 `p=reject` 前，应先检查一段时间的聚合报告，确认所有合法发信源均通过 SPF 或 DKIM 对齐。策略调整后还应验证子域策略、报告地址和第三方发信服务。
+
+## 验证
+
+```bash
+dig +short onprs.online MX
+dig +short onprs.online TXT
+dig +short _dmarc.onprs.online TXT
+dig +short mail.onprs.online A
+dig +short mail.onprs.online AAAA
+dig +short use-mail.onprs.online A
+```
+
+验收条件：
+
+- 根域只有 Cloudflare Email Routing 的三条 MX。
+- `mail.onprs.online` 的 A 记录解析到当前服务器，且未开启 Cloudflare HTTP 代理。
+- 若发布 AAAA，IPv6 路由、防火墙、PTR 和 TLS 必须全部通过实测。
+- SPF 只有一条，并覆盖当前全部发信来源。
+- DKIM 选择器与实际签名方一致。
+- DMARC 报告地址可以正常收信。
+
+DNS 验证通过后，再按 [Cloudflare Email Worker](cloudflare-worker-setup.md) 完成 Catch-all 规则并进行端到端收信测试。

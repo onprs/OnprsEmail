@@ -1,52 +1,71 @@
-# Onprs Email 客户端连接与反向代理指南
+# 客户端连接与反向代理
 
-## 1. 常用邮件客户端连接参数
+## 邮件客户端参数
 
-你可以使用任何支持标准邮件协议的客户端（如 iOS 邮件、Android FairEmail/Gmail、macOS Mail、Outlook、Foxmail、Thunderbird 等）连接你的域名邮箱。
+账号名统一填写完整邮箱地址，例如 `user@onprs.online`。
 
-### 1.1 发送服务器 (SMTP / 出站)
-- **SMTP 服务器 (Host)**: `mail.onprs.online`
-- **端口 / 加密协议**:
-  - **465** (推荐: SSL/TLS / SMTPS)
-  - 或 **587** (STARTTLS / Submission)
-- **身份验证**: 需要身份验证（用户名全称，如 `admin@onprs.online`，以及对应密码）
+### 发送邮件
 
-### 1.2 接收服务器 (IMAP / 入站)
-- **IMAP 服务器 (Host)**: `mail.onprs.online`
-- **端口 / 加密协议**:
-  - **993** (推荐: SSL/TLS / IMAPS)
-  - 或 **143** (STARTTLS / IMAP)
-- **身份验证**: 邮箱账号全称 + 密码
+| 项目 | 推荐值 | 备选值 |
+| :--- | :--- | :--- |
+| 主机 | `mail.onprs.online` | 无 |
+| 端口 | `465` | `587` |
+| 加密 | 隐式 TLS（SMTPS） | STARTTLS（Submission） |
+| 身份验证 | 必须 | 必须 |
 
-### 1.3 接收服务器 (POP3 / 入站，备用)
-- **POP3 服务器 (Host)**: `mail.onprs.online`
-- **端口 / 加密协议**:
-  - **995** (SSL/TLS / POP3S)
-  - 或 **110** (Plain / STARTTLS)
+### 接收邮件
 
----
+| 项目 | 推荐值 | 备选值 |
+| :--- | :--- | :--- |
+| 主机 | `mail.onprs.online` | 无 |
+| 协议 | IMAP | POP3 |
+| 端口 | `993`（隐式 TLS） | `995`（隐式 TLS） |
+| 身份验证 | 必须 | 必须 |
 
-## 2. 1Panel OpenResty 反向代理与 SSL 配置
+`143`、`110` 只应在客户端和服务端均明确启用 STARTTLS 时使用。不要通过未加密连接发送账号密码。
 
-为了让 Web 管理控制台与 Webmail 通过安全 HTTPS 域名访问，可在 1Panel 的 OpenResty 中添加反向代理站点。
+## OpenResty 反向代理
 
-### 2.1 Web 管理控制台 (Stalwart Admin)
-- **域名**: `mail.onprs.online`（或 `admin-mail.onprs.online`）
-- **反向代理目标**: `http://127.0.0.1:4080`
-- **Stalwart HTTP 设置**: 在 **Settings → Network → HTTP → General** 启用 `useXForwarded`，让 Stalwart 使用 1Panel 已发送的 `X-Forwarded-For`。
-- **内部来源允许规则**: 在 **Settings → Security → Allowed IPs** 允许 `172.18.0.1/32`（1Panel 网关）与 `172.19.0.0/16`（邮件内部网络），避免内部代理和 Ingress 被自动封禁。
-- **Proxy Protocol**: 1Panel 使用普通 HTTP 反向代理时，保持 `proxyTrustedNetworks` 为空；只有同时在代理端启用 TCP Proxy Protocol 时才能配置该项。
-- **SSL 证书**: 在 1Panel 申请 Let's Encrypt 证书并开启 HTTPS 强制跳转。
+1Panel OpenResty 负责公网 HTTPS 终止，Compose 中的三个 HTTP 服务只绑定到 `127.0.0.1`。
 
-### 2.2 网页邮箱客户端 (SnappyMail Webmail)
-- **域名**: `webmail.onprs.online`（或通过路径反代）
-- **反向代理目标**: `http://127.0.0.1:4081`
-- **SSL 证书**: 申请 Let's Encrypt 证书并启用 HTTPS。
+| 公网域名或路径 | 本机上游 | 服务 |
+| :--- | :--- | :--- |
+| `https://mail.onprs.online` | `http://127.0.0.1:4080` | Stalwart 管理与 JMAP |
+| `https://mail.onprs.online/api/email-ingress` | `http://127.0.0.1:4082` | Ingress API |
+| `https://use-mail.onprs.online` | `http://127.0.0.1:4081` | SnappyMail |
 
----
+为两个站点配置有效证书和 HTTP 到 HTTPS 跳转。Ingress 路径代理必须保留请求方法、请求体以及 `X-Ingress-Secret`、`X-Registration-Code` 请求头，并允许符合邮件上限的请求体大小。
 
-## 3. SSL 证书复用于邮件协议 (SMTP/IMAP)
+在 Stalwart 中启用对反向代理头的支持前，先确认 OpenResty 会覆盖而不是透传客户端伪造的 `X-Forwarded-For`。可信代理网段必须来自实际 Docker 网络，不要复制固定示例网段：
 
-Stalwart 支持两种 TLS 证书管理模式：
-1. **自动 ACME**：Stalwart 可通过 TLS-ALPN-01 或 DNS 挑战直接自动从 Let's Encrypt 申请并轮换证书。
-2. **复用 1Panel 证书**：`docker-compose.yml` 中已将 1Panel 的 SSL 目录挂载至容器内 `/etc/ssl/1panel`，可直接在 Stalwart Web 后台中指定对应域名的 `.crt` 和 `.key` 文件路径。
+```bash
+docker network inspect 1panel-network
+docker network ls
+docker network inspect <本项目的 mail-network 实际名称>
+```
+
+根据命令输出配置 Stalwart 的可信来源和允许规则。Compose 项目名、网络创建顺序或 1Panel 配置变化后，Docker 网段可能改变。
+
+## 邮件协议 TLS
+
+Stalwart 可以自行通过 ACME 管理证书，也可以读取 Compose 只读挂载的 1Panel 证书目录：
+
+```text
+宿主机：/opt/1panel/apps/openresty/openresty/conf/ssl
+容器内：/etc/ssl/1panel
+```
+
+配置证书路径后，分别验证 465、587、993 和 143 的证书链、主机名与协议模式。HTTPS 页面正常不代表 SMTP 或 IMAP 已使用同一张有效证书。
+
+SnappyMail 容器通过内部 Docker 网络连接 Stalwart。`setup.sh` 会把仓库中的域模板写入新数据目录；模板允许内部自签名证书且关闭证书校验。公网客户端仍必须校验 `mail.onprs.online` 的证书。若内部链路已部署受信任证书，应同步收紧 [SnappyMail 域配置模板](../config/snappymail/domains/onprs.online.json)，并在已部署的数据目录中更新对应域配置。
+
+## 验证
+
+```bash
+bash scripts/test-email.sh
+openssl s_client -connect mail.onprs.online:465 -servername mail.onprs.online
+openssl s_client -connect mail.onprs.online:993 -servername mail.onprs.online
+openssl s_client -starttls smtp -connect mail.onprs.online:587 -servername mail.onprs.online
+```
+
+最后使用普通邮箱账号完成一次登录、收信和发信测试。管理账号不应作为日常客户端测试账号。

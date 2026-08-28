@@ -1,6 +1,6 @@
 services:
   # ----------------------------------------------------------------------------
-  # Stalwart 现代化全功能邮件服务器 (Rust 编写，极低内存占用)
+  # Stalwart 邮件服务器
   # ----------------------------------------------------------------------------
   stalwart:
     image: ${STALWART_IMAGE:-stalwartlabs/stalwart@sha256:9ed1d343243b7aa72969e372a7240b7ddea07730781d4b68a0dc3d8d51c418bb}
@@ -33,7 +33,7 @@ services:
         max-file: "5"
 
   # ----------------------------------------------------------------------------
-  # 通用邮件 Ingress 接收网关 (对接 Cloudflare Email Worker Catch-all 规则)
+  # 邮件 Ingress 服务（对接 Cloudflare Email Worker Catch-all 规则）
   # ----------------------------------------------------------------------------
   email-ingress:
     build:
@@ -47,6 +47,7 @@ services:
       - STALWART_PROVISIONING_TOKEN=${STALWART_PROVISIONING_TOKEN:-}
       - STALWART_REGISTRATION_DOMAIN_ID=${STALWART_REGISTRATION_DOMAIN_ID:-}
       - STALWART_MANAGEMENT_URL=http://stalwart:8080
+      - MAIL_HOSTNAME=${MAIL_HOSTNAME:-mail.onprs.online}
       - MAIL_DOMAIN=${MAIL_DOMAIN:-onprs.online}
       - STALWART_SMTP_HOST=stalwart
       - STALWART_SMTP_PORT=25
@@ -65,7 +66,7 @@ services:
         max-file: "3"
 
   # ----------------------------------------------------------------------------
-  # SnappyMail Webmail 网页邮箱客户端 (超轻量现代前端)
+  # SnappyMail 网页邮箱
   # ----------------------------------------------------------------------------
   webmail:
     image: ${SNAPPYMAIL_IMAGE:-djmaze/snappymail@sha256:5e3d990438809a8a49f8ac5758db03e858e6e9fc0e369e1f9e474f7664079905}
@@ -75,7 +76,7 @@ services:
       # Webmail 页面（仅绑定 127.0.0.1，由 1Panel OpenResty 反代）
       - "${SNAPPYMAIL_HTTP_PORT:-127.0.0.1:4081}:8888"
     volumes:
-      - ${SNAPPYMAIL_DATA_PATH:-/opt/onprs-email/snappymail-data}:/var/lib/snappymail/data
+      - ${SNAPPYMAIL_DATA_PATH:-/opt/onprs-email/snappymail-data}:/var/lib/snappymail
     networks:
       - mail-network
     depends_on:

@@ -262,6 +262,58 @@ class IngressApiTest(unittest.TestCase):
             )
         self.assertEqual(reserved_name.exception.code, 422)
 
+    def test原始邮件解析失败时返回稳定机器码(self):
+        body = {
+            "from": "sender@example.com",
+            "to": "login@onprs.online",
+            "raw": sample_raw(),
+        }
+        with (
+            patch.object(ingress, "parse_raw_email", side_effect=ValueError("invalid mime")),
+            patch.object(ingress, "save_emails") as save,
+            patch.object(ingress.smtplib, "SMTP") as smtp,
+        ):
+            with self.assertRaises(HTTPError) as context:
+                self.request("/api/email-ingress", method="POST", body=body)
+        self.assertEqual(context.exception.code, 400)
+        payload = json.loads(context.exception.read().decode("utf-8"))
+        self.assertEqual(payload["code"], "invalid_raw_email")
+        save.assert_not_called()
+        smtp.assert_not_called()
+
+    def test邮件持久化失败时拒绝确认接收(self):
+        body = {
+            "from": "sender@example.com",
+            "to": "login@onprs.online",
+            "raw": sample_raw(),
+        }
+        with (
+            patch.object(ingress, "save_emails", side_effect=OSError("disk full")),
+            patch.object(ingress.smtplib, "SMTP") as smtp,
+        ):
+            with self.assertRaises(HTTPError) as context:
+                self.request("/api/email-ingress", method="POST", body=body)
+        self.assertEqual(context.exception.code, 500)
+        payload = json.loads(context.exception.read().decode("utf-8"))
+        self.assertEqual(payload["code"], "message_persistence_failed")
+        smtp.assert_not_called()
+
+    def test内部SMTP失败时保留全部收件记录并确认接收(self):
+        body = {
+            "from": "sender@example.com",
+            "to": ["login@onprs.online", "alerts@onprs.online"],
+            "raw": sample_raw(),
+        }
+        with patch.object(ingress.smtplib, "SMTP", side_effect=OSError("connection refused")):
+            status, payload, _ = self.request("/api/email-ingress", method="POST", body=body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "success")
+        messages = ingress.query_emails(mail_to="login@onprs.online")
+        alert_messages = ingress.query_emails(mail_to="alerts@onprs.online")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(len(alert_messages), 1)
+        self.assertEqual(messages[0]["subject"], "登录验证码")
+
     def test单封状态和删除(self):
         email_id = self.save_sample()
         status, _, _ = self.request(f"/api/email-ingress/v2/messages/{email_id}", method="PATCH", body={"is_read": True})

@@ -1,95 +1,161 @@
 # Onprs Email 域名邮箱服务
 
-基于 **Stalwart Mail Server**（Rust 现代化邮件服务引擎）、**PostgreSQL 18** 存储后端、**SnappyMail**（轻量 Webmail 前端）以及 **Cloudflare Email Ingress Gateway** 构建的企业级轻量全功能域名邮箱服务。
+Onprs Email 是面向 `onprs.online` 的自托管邮件服务仓库。项目组合 Stalwart Mail Server、SnappyMail、Cloudflare Email Routing 和自研 Ingress 服务，在服务器无法使用公网 TCP 25 端口的条件下完成收信、客户端访问和出站中继。
 
-专为 `onprs.online` 打造，支持全域通配收信、安全出站中继与全客户端无缝支持。
+线上仓库：<https://github.com/onprs/OnprsEmail.git>，默认分支为 `main`。
 
-> 📦 **线上仓库**：`https://github.com/onprs/OnprsEmail.git`（公开只读，默认分支 `main`）
+## 架构
 
----
+入站邮件采用以下链路：
 
-## 🌟 核心特性与架构
+```text
+外部发件服务器
+  -> Cloudflare Email Routing
+  -> Email Worker（HTTPS + Ingress 密钥）
+  -> Ingress SQLite
+  -> 内部 SMTP（尽力同步至 Stalwart）
+```
 
-- 🦀 **现代全合一核心**：Stalwart Mail Server 单容器运行，内存开销极低（~100MB），无缝直连 PostgreSQL 18。
-- ⚡ **全域通配入库（Catch-all Ingress）**：
-  - 基于 Cloudflare Email Routing + Worker + 本地 Ingress Gateway；
-  - 免受 VPS 厂商 25 端口封锁限制，发往 `*@onprs.online` 的所有邮件秒级全自动入库，支持任意动态新邮箱。
-- **桌面端账号创建**：通过独立注册码和隔离的无密码 Stalwart 注册主体在客户端内创建普通邮箱，无需访问网页后台。
-- 🚀 **智能出站路由（Outbound Relay）**：
-  - 原生配置 SMTP Relay（走 587/465 端口至 Brevo / Resend），解决 25 端口直发拦截问题，保证 100% 送达率。
-- 🖥️ **双控制台与 Webmail**：
-  - 管理后台：`https://mail.onprs.online`（Stalwart Admin）
-  - 网页邮箱：`https://use-mail.onprs.online`（SnappyMail Webmail）
-- 🔒 **全套安全标准**：
-  - 双重 DKIM 签名（RSA 2048 + Ed25519）
-  - SPF、DMARC 严格策略
-  - SMTPS (465) / IMAPS (993) 全程 TLS 加密
+Ingress 在返回成功前先将邮件写入 SQLite，然后尝试投递到 Stalwart。内部 SMTP 暂时不可用时，邮件仍保留在 Ingress 数据库中，但当前实现不会自动重试 SMTP 投递。运维检查需要同时验证 Ingress API 与 Stalwart 邮箱。
 
----
+出站邮件由 Stalwart 通过 SMTP Relay 的 465 或 587 端口发送。最终送达结果仍取决于中继商配置、域名鉴权、收件方策略和邮件内容，项目不对送达率作保证。
 
-## 📁 仓库结构
+生产环境中的 Stalwart 使用既有 PostgreSQL 服务。PostgreSQL 连接由 Stalwart 管理配置维护，不在本仓库的 Compose 文件中保存数据库凭据。
+
+## 主要能力
+
+- Cloudflare Email Routing Catch-all 收信，不依赖服务器公网 TCP 25 入站连通性。
+- Stalwart 提供 SMTP Submission、IMAP、POP3、ManageSieve 和管理接口。
+- SnappyMail 提供网页邮箱。
+- Ingress 提供邮件摘要、详情、附件、原始邮件和状态管理 API。
+- 桌面端通过独立注册码创建固定域名下的普通邮箱账号。
+- 镜像基础版本使用 digest 固定，容器日志配置轮转。
+- Python 单元测试、ShellCheck、JavaScript 语法和 Compose 配置由统一检查入口及 CI 验证。
+
+## 仓库结构
 
 ```text
 Onprs_Email/
-├── AGENTS.md                # 仓库全局规范与最新状态约定
-├── README.md                # 项目快速入门与说明
-├── docker-compose.yml       # 容器编排（Stalwart + Ingress + SnappyMail）
-├── .env.example             # 环境变量配置模板
-├── cloudflare-worker/       # Cloudflare Catch-all Worker 脚本
-│   └── worker.js            # 通用全域捕获与 HTTPS 直投脚本
-├── services/                # 自研微服务
-│   └── ingress/             # 通用邮件 Ingress 接收网关 (Dockerfile + app.py)
-├── config/                  # 配置文件模版
-│   └── snappymail/domains/  # SnappyMail 预置域名与连接配置
-├── scripts/                 # 自动化运维工具
-│   ├── setup.sh             # 一键安装部署脚本
-│   ├── configure-registration.py # 创建桌面端注册所需的隔离主体和受限 API Key
-│   ├── backup.sh            # 数据与密钥自动备份脚本
-│   └── test-email.sh        # 服务健康状态与端口自检脚本
-└── docs/                    # 完整操作指引
-    ├── dns-setup.md         # Cloudflare DNS 解析规范
-    ├── relay-setup.md       # SMTP Relay 出站中继配置指南
-    ├── client-setup.md      # 常用客户端与 1Panel 反代指南
-    ├── ingress-api.md       # Ingress v2 查询与下载接口
-    ├── account-registration.md # 桌面端创建邮箱配置指南
-    └── cloudflare-worker-setup.md # Cloudflare Worker 通配配置指南
+├── .github/workflows/quality.yml      # GitHub Actions 质量检查
+├── cloudflare-worker/worker.js        # Cloudflare Email Worker
+├── config/snappymail/domains/         # SnappyMail 域配置模板
+├── docs/                              # 部署、接口与运维文档
+├── scripts/
+│   ├── backup.sh                      # 数据与配置备份
+│   ├── check.sh                       # 统一质量检查入口
+│   ├── configure-registration.py      # 配置桌面端账号创建服务
+│   ├── setup.sh                       # 服务器部署脚本
+│   ├── test-backup.sh                 # 备份归档夹具测试
+│   ├── test_configure_registration.py # 注册配置单元测试
+│   └── test-email.sh                  # 运行状态自检
+├── services/ingress/
+│   ├── app.py                         # Ingress 服务
+│   ├── Dockerfile                     # Ingress 镜像定义
+│   └── test_app.py                    # Ingress 单元测试
+├── .env.example                       # 环境变量模板
+└── docker-compose.yml                 # 容器编排
 ```
 
----
+## 部署前提
 
-## 🚀 快速启动与运维
+目标部署环境为 Debian 13。执行部署脚本前需要确认：
 
-### 本地克隆
+- 已安装 Docker Engine 与 Docker Compose 插件。
+- 当前用户为 `root`。
+- 1Panel 创建的外部 Docker 网络 `1panel-network` 已存在。
+- `/opt/1panel/apps/openresty/openresty/conf/ssl` 是有效的只读证书目录。
+- OpenResty 已预留 4080、4081 和 4082 对应的本机反向代理入口。
+- 数据目录具有足够空间，且不与现有业务目录重合。
+
+部署脚本会创建 `.env`、生成 Ingress 密钥和桌面端注册码、校验 Compose 配置、准备持久化目录并重建三个服务容器。新部署会写入 SnappyMail 域模板；旧部署若仍使用镜像自动创建的匿名卷，脚本会先停止 SnappyMail、复制运行数据到宿主机目录并重新启动旧容器，再进行后续重建。迁移函数不会主动删除旧卷；重建完成后应先验证新挂载，再单独核对和清理无引用卷。
+
+脚本不会自动修改 DNS、Stalwart 数据库连接、TLS、邮件域或出站 Relay 配置。
+
+## 部署
 
 ```bash
-# HTTPS 方式（需代理）
 git clone https://github.com/onprs/OnprsEmail.git
-
-# SSH 方式
-git clone git@github.com:onprs/OnprsEmail.git
+cd OnprsEmail
+bash scripts/setup.sh
 ```
 
-### 服务器部署
-
-在服务器（`sub2api_tokyo`）目录 `/opt/onprs-email` 执行：
+已有任一目标容器时，脚本会拒绝直接重建。完成备份并确认维护影响后，显式执行：
 
 ```bash
-# 启动所有服务容器
-docker compose up -d
-
-# 服务状态自检
-./scripts/test-email.sh
-
-# 一键数据备份
-./scripts/backup.sh
+bash scripts/setup.sh --confirm-recreate
 ```
 
----
+基础服务启动后，按需配置桌面端账号创建功能：
 
-## 🔗 访问入口汇总
+```bash
+python3 scripts/configure-registration.py
+```
 
-| 服务 | 公网访问地址 | 内部转发端口 |
+配置顺序和安全边界见 [桌面端账号创建](docs/account-registration.md)。
+
+## 验证
+
+服务器本地自检：
+
+```bash
+bash scripts/test-email.sh
+```
+
+脚本检查三个容器、全部服务端口、三个 HTTP 入口和 Cloudflare MX 记录。任何核心检查失败时，脚本返回非零退出码；缺少可选的 `dig` 时只报告跳过。
+
+Ingress 公开健康端点：
+
+```bash
+curl --fail https://mail.onprs.online/api/email-ingress/health
+```
+
+单元测试与静态检查：
+
+```bash
+bash scripts/check.sh
+```
+
+本地缺少 Docker 或 ShellCheck 时，普通模式会跳过对应检查。CI 使用严格模式，缺少任何必需工具都会失败：
+
+```bash
+bash scripts/check.sh --strict
+```
+
+## 备份
+
+生产环境使用 PostgreSQL 时，先在 `.env` 中填写：
+
+```dotenv
+POSTGRES_BACKUP_ENABLED=true
+POSTGRES_BACKUP_CONTAINER=<PostgreSQL 容器名>
+POSTGRES_BACKUP_DATABASE=stalwart
+POSTGRES_BACKUP_USER=<具备 pg_dump 权限的数据库用户>
+```
+
+然后执行：
+
+```bash
+bash scripts/backup.sh
+```
+
+归档包含 Stalwart 文件、SnappyMail 实际运行数据、Ingress SQLite 一致性快照、PostgreSQL 自定义格式导出、部署环境文件和 Compose 配置。旧部署尚未完成 SnappyMail 卷迁移时，备份脚本会直接从现有容器复制 `/var/lib/snappymail`，避免漏掉匿名卷中的配置。
+
+归档含真实邮件与凭据，只能以 `0600` 权限保存，并应在异地复制前加密。备份范围、校验和恢复演练见 [备份与恢复](docs/backup-restore.md)。
+
+## 服务入口
+
+| 服务 | 公网地址 | 本机上游 |
 | :--- | :--- | :--- |
-| **Stalwart 管理后台** | `https://mail.onprs.online` | `http://127.0.0.1:4080` |
-| **SnappyMail 网页邮箱** | `https://use-mail.onprs.online` | `http://127.0.0.1:4081` |
-| **Ingress 接收网关** | `https://mail.onprs.online/api/email-ingress` | `http://127.0.0.1:4082` |
+| Stalwart 管理后台 | `https://mail.onprs.online` | `http://127.0.0.1:4080` |
+| SnappyMail 网页邮箱 | `https://use-mail.onprs.online` | `http://127.0.0.1:4081` |
+| Ingress API | `https://mail.onprs.online/api/email-ingress` | `http://127.0.0.1:4082` |
+
+## 文档
+
+- [DNS 配置](docs/dns-setup.md)
+- [Cloudflare Email Worker](docs/cloudflare-worker-setup.md)
+- [客户端与反向代理](docs/client-setup.md)
+- [SMTP Relay](docs/relay-setup.md)
+- [Ingress API](docs/ingress-api.md)
+- [桌面端账号创建](docs/account-registration.md)
+- [备份与恢复](docs/backup-restore.md)

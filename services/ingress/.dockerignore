@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+test_*.py
+*.db
+*.db-shm
+*.db-wal

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Onprs Email - 通用邮件 Ingress 接收网关服务
-功能：
-1. 接收来自 Cloudflare Email Worker (Catch-all) 的原始邮件；
-2. 自动解析邮件元数据（发件人、收件人、主题、文本、HTML、链接、验证码与附件）；
-3. 将邮件持久化至 SQLite 数据库并提供兼容旧接口的查询 API；
-4. 尽力将邮件投递至内部 Stalwart SMTP 服务。
+Onprs Email 邮件 Ingress 服务。
+
+职责：
+1. 接收 Cloudflare Email Worker 转发的原始邮件；
+2. 解析邮件元数据并持久化至 SQLite；
+3. 提供兼容接口、v2 邮件接口和桌面端账号创建接口；
+4. 尝试通过内部 SMTP 将邮件同步投递至 Stalwart。
 """
 
 import os
@@ -36,6 +37,7 @@ INGRESS_SECRET = os.environ.get("INGRESS_SECRET_KEY", "")
 SMTP_HOST = os.environ.get("STALWART_SMTP_HOST", "stalwart")
 SMTP_PORT = int(os.environ.get("STALWART_SMTP_PORT", 25))
 DB_PATH = os.environ.get("INGRESS_DB_PATH", "/app/data/ingress_emails.db")
+MAIL_HOSTNAME = os.environ.get("MAIL_HOSTNAME", "mail.onprs.online").lower().strip()
 MAIL_DOMAIN = os.environ.get("MAIL_DOMAIN", "onprs.online").lower().strip()
 ACCOUNT_REGISTRATION_CODE = os.environ.get("ACCOUNT_REGISTRATION_CODE", "")
 STALWART_PROVISIONING_TOKEN = os.environ.get("STALWART_PROVISIONING_TOKEN", "")
@@ -347,28 +349,41 @@ def find_attachment(raw_content: str, part_id: str) -> Optional[Tuple[Any, bytes
     return None
 
 
-def save_email(mail_from: str, mail_to: str, raw_content: str, parsed: Dict[str, Any]):
-    """保存邮件到 SQLite。"""
+def save_emails(mail_from: str, recipients: Iterable[str], raw_content: str, parsed: Dict[str, Any]):
+    """在同一事务中保存邮件的全部收件记录。"""
+    recipient_list = [recipient.lower().strip() for recipient in recipients]
+    if not recipient_list:
+        return
+    links = json.dumps(parsed.get("links", []), ensure_ascii=False)
+    created_at = time.time()
+    rows = [
+        (
+            parsed.get("message_id", ""),
+            mail_from,
+            recipient,
+            parsed.get("subject", ""),
+            parsed.get("body_text", ""),
+            parsed.get("body_html", ""),
+            links,
+            parsed.get("otp_code", ""),
+            raw_content,
+            created_at,
+        )
+        for recipient in recipient_list
+    ]
     with connect_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
+        conn.executemany("""
             INSERT INTO emails (
                 message_id, mail_from, mail_to, subject, body_text, body_html,
                 links, otp_code, raw_email, created_at, is_read
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-        """, (
-            parsed.get("message_id", ""),
-            mail_from,
-            mail_to.lower().strip(),
-            parsed.get("subject", ""),
-            parsed.get("body_text", ""),
-            parsed.get("body_html", ""),
-            json.dumps(parsed.get("links", []), ensure_ascii=False),
-            parsed.get("otp_code", ""),
-            raw_content,
-            time.time()
-        ))
+        """, rows)
         conn.commit()
+
+
+def save_email(mail_from: str, mail_to: str, raw_content: str, parsed: Dict[str, Any]):
+    """保存单个收件地址的邮件记录。"""
+    save_emails(mail_from, [mail_to], raw_content, parsed)
 
 
 def row_links(value: Optional[str]) -> List[str]:
@@ -846,29 +861,34 @@ class IngressHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "Invalid raw field"})
                 return
 
-            parsed_data: Dict[str, Any] = {
-                "message_id": "",
-                "subject": "",
-                "body_text": "",
-                "body_html": "",
-                "links": [],
-                "otp_code": "",
-            }
             try:
                 parsed_data = parse_raw_email(raw_bytes)
-                for recipient in recipients:
-                    save_email(mail_from, recipient, raw_text, parsed_data)
-                logging.info("邮件已解析并存入数据库: Subject='%s', To=%s", parsed_data.get("subject"), recipients)
             except Exception as parse_err:
-                logging.error("邮件解析存库异常: %s", parse_err, exc_info=True)
+                logging.warning("原始邮件解析失败: %s", parse_err, exc_info=True)
+                self.send_json(400, {
+                    "error": "Invalid raw email",
+                    "code": "invalid_raw_email",
+                })
+                return
+
+            try:
+                save_emails(mail_from, recipients, raw_text, parsed_data)
+                logging.info("邮件已解析并存入数据库: Subject='%s', To=%s", parsed_data.get("subject"), recipients)
+            except Exception as persistence_error:
+                logging.error("邮件持久化失败: %s", persistence_error, exc_info=True)
+                self.send_json(500, {
+                    "error": "Message persistence failed",
+                    "code": "message_persistence_failed",
+                })
+                return
 
             try:
                 with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as smtp_client:
-                    smtp_client.ehlo("mail.onprs.online")
+                    smtp_client.ehlo(MAIL_HOSTNAME)
                     smtp_client.sendmail(mail_from, recipients, raw_bytes)
                 logging.info("邮件成功同步投递至 Stalwart SMTP: To=%s", recipients)
             except Exception as smtp_err:
-                logging.warning("Stalwart SMTP 投递提示: %s (邮件已在 Ingress 数据库中保留)", str(smtp_err))
+                logging.warning("Stalwart SMTP 投递失败: %s（邮件已保留在 Ingress 数据库中）", str(smtp_err))
 
             self.send_json(200, {
                 "status": "success",
@@ -891,13 +911,13 @@ def run_server():
     port = 8080
     server_address = ("0.0.0.0", port)
     httpd = ThreadingHTTPServer(server_address, IngressHandler)
-    logging.info("通用邮件 Ingress 接收网关正在监听 0.0.0.0:%d ...", port)
+    logging.info("邮件 Ingress 服务正在监听 0.0.0.0:%d", port)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     httpd.server_close()
-    logging.info("Ingress 服务已停止。")
+    logging.info("邮件 Ingress 服务已停止")
 
 
 if __name__ == "__main__":

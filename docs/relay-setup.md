@@ -1,52 +1,53 @@
-# Onprs Email 出站 SMTP Relay（中继）配置指南
+# SMTP Relay 配置
 
-## 1. 为什么需要 SMTP Relay？
+目标服务器无法通过公网 TCP 25 端口直连收件方 MX，因此 Stalwart 的外发邮件必须交给支持 465 或 587 的 SMTP Relay。Relay 可以解决网络出口限制，但不能保证最终送达；收件方仍会根据 SPF、DKIM、DMARC、信誉和内容策略处理邮件。
 
-在主机环境实测中已核实：云服务商（Bytevirt VPS）**封禁了出站的 TCP 25 端口**。这意味着本机 MTA 无法通过 25 端口直连外部目标（如 Gmail、Outlook、QQ 邮箱等）的接收服务器。
+## 选择服务商
 
-因此，所有发往外部公共邮箱的邮件，需要通过开放的 **587 (STARTTLS)** 或 **465 (SSL/TLS)** 端口，经由受信任的 SMTP Relay 中继服务商代理投递。
+选择 Relay 时应核对：
 
----
+- 是否支持当前业务类型和预计发送量。
+- 是否提供 587 STARTTLS 或 465 隐式 TLS。
+- 是否支持自定义域名的 SPF、DKIM 与回信地址对齐。
+- 退信、投诉、限流和日志的保留方式。
+- 凭据轮换、来源地址限制和多因素认证能力。
+- 当前价格、配额和区域限制。
 
-## 2. 常见免费/高送达率 Relay 服务商推荐
+Brevo、Resend、Amazon SES 等服务均可作为候选，但具体配额和价格会变化，应以服务商当前官方文档与控制台为准。
 
-1. **Brevo (原 Sendinblue)**：
-   - 免费额度：每日 300 封邮件，永久免费。
-   - SMTP 主机：`smtp-relay.brevo.com`，端口 `587`。
-2. **Resend**：
-   - 免费额度：每月 3,000 封邮件（每日限额 100 封）。
-   - 开发者体验好，API 与 SMTP 双支持。
-   - SMTP 主机：`smtp.resend.com`，端口 `465` 或 `587`。
-3. **Amazon SES (Simple Email Service)**：
-   - 极低成本，送达率行业顶尖，每万封仅约 $0.10。
-4. **自建中继（备选）**：
-   - 使用其他 25 端口开放的海外 VPS 搭建轻量 Postfix 作为专有转发中继。
+## 配置 Stalwart
 
----
+Stalwart 管理界面的菜单名称会随版本变化。当前目标是创建默认出站路由，并填写 Relay 提供的参数：
 
-## 3. 在 Stalwart Mail Server 中配置 Outbound Relay
+| 配置项 | 值 |
+| :--- | :--- |
+| 协议 | SMTP |
+| 主机 | Relay 提供的 SMTP 主机名 |
+| 端口 | `587` 或 `465` |
+| TLS 模式 | 587 使用 STARTTLS；465 使用隐式 TLS |
+| 身份验证 | Relay 提供的 SMTP 用户名与专用密码或令牌 |
 
-Stalwart 原生支持多维度出站路由规则（Outbound Routing）。
+不要把 Relay 凭据写入仓库、文档、截图或普通日志。保存后先使用服务商的连接测试功能，再从普通业务账号发送测试邮件。
 
-### 3.1 步骤说明（WebUI 管理后台）
+## 域名鉴权
 
-1. 登录 Stalwart 管理后台；
-2. 导航至 **Settings** -> **Routing** -> **Outbound**；
-3. 新建或编辑默认出站规则（Default Routing Rule）：
-   - **Protocol**: `SMTP`
-   - **Host**: 填写中继服务商主机名（如 `smtp-relay.brevo.com`）
-   - **Port**: `587` (STARTTLS) 或 `465` (Implicit TLS)
-   - **Authentication**: `Username & Password`
-   - **Username**: 填写中继服务商提供的 SMTP 登录用户名
-   - **Password**: 填写中继服务商生成的 SMTP 专用密码/API Key
-4. 保存并测试发信。
+配置 Relay 后，按服务商要求完成：
 
----
+1. 将 Relay 发信源合并到根域唯一的 SPF 记录。
+2. 发布 Relay 提供的 DKIM TXT 或 CNAME 记录。
+3. 确认 Header From、Envelope From 和 DKIM 签名域满足 DMARC 对齐。
+4. 检查 DMARC 聚合报告，再决定是否提高策略强度。
 
-## 4. 发信送达率测试（Mail-Tester）
+DNS 配置原则见 [DNS 配置](dns-setup.md)。不要直接复制其他服务商的 `include` 或 DKIM 记录。
 
-完成 DNS 与 Relay 设置后，访问 [mail-tester.com](https://www.mail-tester.com/)：
-1. 复制 Mail-Tester 提供的临时邮箱地址；
-2. 从你的域名邮箱（例如 `admin@onprs.online`）向该测试地址发送一封正常带正文的邮件；
-3. 在 Mail-Tester 刷新查看评分（目标得分：**9/10 ~ 10/10**）；
-4. 根据报告查漏补缺（如 DKIM、SPF 匹配度、HTML 正文格式等）。
+## 验证
+
+至少完成以下测试：
+
+- 向 Gmail、Outlook、QQ 邮箱等不同收件系统发送纯文本和 HTML 邮件。
+- 检查邮件原始头中的 `Received`、`Authentication-Results`、SPF、DKIM 和 DMARC 结果。
+- 验证不存在 Relay 拒绝、配额耗尽、TLS 降级或身份验证失败。
+- 使用邮件鉴权测试工具检查配置，但不要把单一评分当作送达保证。
+- 验证退信能够回到受监控的邮箱，并建立告警或人工处理流程。
+
+如果 Stalwart 已接受邮件但外部收件箱没有收到，应同时检查 Stalwart 队列、Relay 事件日志和收件方退信，而不是仅重复发送。

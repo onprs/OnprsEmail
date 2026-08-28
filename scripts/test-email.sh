@@ -1,62 +1,145 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Onprs Email 服务连通性与健康自检脚本
-# ==============================================================================
+# 检查容器状态、本机监听端口、HTTP 健康端点与公开 DNS。
 
-set -euo pipefail
+set -u -o pipefail
 
-GREEN='\033[032m'
-RED='\033[031m'
-YELLOW='\033[033m'
-BLUE='\033[036m'
+GREEN='\033[32m'
+RED='\033[31m'
+YELLOW='\033[33m'
+BLUE='\033[36m'
 PLAIN='\033[0m'
+FAILURES=0
+WARNINGS=0
 
-echo -e "${BLUE}=== 开始 Onprs Email 邮件服务连通性检查 ===${PLAIN}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$SCRIPT_DIR" || exit 1
 
-# 1. 检查 Docker 容器运行状态
-echo -n "1. 容器运行状态: "
-if docker ps --filter "name=stalwart-mail" --format '{{.Status}}' | grep -q "Up"; then
-    echo -e "${GREEN}[正常] stalwart-mail 正在运行${PLAIN}"
-else
-    echo -e "${RED}[异常] stalwart-mail 未运行！${PLAIN}"
+if [ -f .env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    if ! source .env; then
+        set +a
+        printf '[错误] 无法加载 .env。\n' >&2
+        exit 1
+    fi
+    set +a
 fi
 
-# 2. 检查本地端口监听
-check_port() {
-    local port=$1
-    local name=$2
-    if ss -tulpn | grep -q ":${port} "; then
-        echo -e "   - 端口 ${port} (${name}): ${GREEN}已监听${PLAIN}"
+pass() {
+    printf '%b[正常]%b %s\n' "$GREEN" "$PLAIN" "$1"
+}
+
+fail() {
+    printf '%b[异常]%b %s\n' "$RED" "$PLAIN" "$1"
+    FAILURES=$((FAILURES + 1))
+}
+
+warn() {
+    printf '%b[跳过]%b %s\n' "$YELLOW" "$PLAIN" "$1"
+    WARNINGS=$((WARNINGS + 1))
+}
+
+host_port() {
+    local binding="$1"
+    printf '%s\n' "${binding##*:}"
+}
+
+check_container() {
+    local container_name="$1"
+    local display_name="$2"
+    local running
+    running="$(docker inspect --format '{{.State.Running}}' "$container_name" 2>/dev/null || true)"
+    if [ "$running" = "true" ]; then
+        pass "${display_name} 容器正在运行。"
     else
-        echo -e "   - 端口 ${port} (${name}): ${RED}未监听${PLAIN}"
+        fail "${display_name} 容器未运行。"
     fi
 }
 
-echo "2. 核心端口监听自检:"
-check_port 25 "SMTP Inbound"
-check_port 465 "SMTPS"
-check_port 587 "Submission"
-check_port 993 "IMAPS"
-check_port 143 "IMAP"
-check_port 4080 "Stalwart WebUI (Internal HTTP)"
+check_port() {
+    local binding="$1"
+    local display_name="$2"
+    local port
+    port="$(host_port "$binding")"
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        fail "${display_name} 的端口配置无效：${binding}"
+        return
+    fi
+    if ss -H -ltn | awk -v suffix=":${port}" '
+        substr($4, length($4) - length(suffix) + 1) == suffix { found = 1 }
+        END { exit !found }
+    '; then
+        pass "${display_name} 正在本机端口 ${port} 监听。"
+    else
+        fail "${display_name} 未在本机端口 ${port} 监听。"
+    fi
+}
 
-# 3. 检查 Stalwart Web 管理端实际响应
-echo -n "3. Stalwart WebUI 健康检查: "
-if curl -fsS --connect-timeout 3 --max-time 10 http://127.0.0.1:4080/healthz/live >/dev/null; then
-    echo -e "${GREEN}[正常] HTTP 服务可访问${PLAIN}"
+check_http() {
+    local url="$1"
+    local display_name="$2"
+    if curl --fail --silent --show-error --connect-timeout 3 --max-time 10 "$url" >/dev/null; then
+        pass "${display_name} 可访问。"
+    else
+        fail "${display_name} 不可访问：${url}"
+    fi
+}
+
+printf '%b=== Onprs Email 服务自检 ===%b\n' "$BLUE" "$PLAIN"
+
+if ! command -v docker >/dev/null 2>&1; then
+    fail "未安装 Docker，无法检查容器。"
 else
-    echo -e "${RED}[异常] HTTP 服务不可访问${PLAIN}"
+    check_container stalwart-mail "Stalwart"
+    check_container email-ingress-gateway "Ingress"
+    check_container snappymail-web "SnappyMail"
 fi
 
-# 4. 检查 DNS 解析
-echo "4. 域名 DNS 解析核查:"
-if command -v dig &>/dev/null; then
-    RESOLVED_IP=$(dig +short mail.onprs.online A | tail -n1)
-    echo -e "   - mail.onprs.online A 记录: ${YELLOW}${RESOLVED_IP:-未解析}${PLAIN}"
-    RESOLVED_MX=$(dig +short onprs.online MX | tail -n1)
-    echo -e "   - onprs.online MX 记录: ${YELLOW}${RESOLVED_MX:-未解析}${PLAIN}"
+if ! command -v ss >/dev/null 2>&1; then
+    fail "未安装 ss，无法检查监听端口。"
 else
-    echo "   - 未安装 dig 工具，跳过 DNS 命令行查询"
+    check_port "${SMTP_PORT:-25}" "SMTP"
+    check_port "${SMTPS_PORT:-465}" "SMTPS"
+    check_port "${SUBMISSION_PORT:-587}" "Submission"
+    check_port "${IMAP_PORT:-143}" "IMAP"
+    check_port "${IMAPS_PORT:-993}" "IMAPS"
+    check_port "${POP3_PORT:-110}" "POP3"
+    check_port "${POP3S_PORT:-995}" "POP3S"
+    check_port "${SIEVE_PORT:-4190}" "ManageSieve"
+    check_port "${STALWART_HTTP_PORT:-127.0.0.1:4080}" "Stalwart HTTP"
+    check_port "${SNAPPYMAIL_HTTP_PORT:-127.0.0.1:4081}" "SnappyMail HTTP"
+    check_port "${INGRESS_HTTP_PORT:-127.0.0.1:4082}" "Ingress HTTP"
 fi
 
-echo -e "${BLUE}=== 检查结束 ===${PLAIN}"
+if ! command -v curl >/dev/null 2>&1; then
+    fail "未安装 curl，无法检查 HTTP 服务。"
+else
+    STALWART_PORT="$(host_port "${STALWART_HTTP_PORT:-127.0.0.1:4080}")"
+    SNAPPYMAIL_PORT="$(host_port "${SNAPPYMAIL_HTTP_PORT:-127.0.0.1:4081}")"
+    INGRESS_PORT="$(host_port "${INGRESS_HTTP_PORT:-127.0.0.1:4082}")"
+    check_http "http://127.0.0.1:${STALWART_PORT}/healthz/live" "Stalwart 健康端点"
+    check_http "http://127.0.0.1:${SNAPPYMAIL_PORT}/" "SnappyMail 页面"
+    check_http "http://127.0.0.1:${INGRESS_PORT}/health" "Ingress 健康端点"
+fi
+
+if command -v dig >/dev/null 2>&1; then
+    MX_RECORDS="$(dig +short "${MAIL_DOMAIN:-onprs.online}" MX)"
+    MAIL_ADDRESS="$(dig +short "${MAIL_HOSTNAME:-mail.onprs.online}" A | tail -n 1)"
+    if [[ "$MX_RECORDS" == *mx.cloudflare.net* ]]; then
+        pass "MX 记录指向 Cloudflare Email Routing。"
+    else
+        fail "MX 记录未指向 Cloudflare Email Routing。"
+    fi
+    if [ -n "$MAIL_ADDRESS" ]; then
+        pass "${MAIL_HOSTNAME:-mail.onprs.online} 已解析为 ${MAIL_ADDRESS}。"
+    else
+        fail "${MAIL_HOSTNAME:-mail.onprs.online} 没有可用的 A 记录。"
+    fi
+else
+    warn "未安装 dig，未检查公开 DNS。"
+fi
+
+printf '%b=== 自检完成：%d 项异常，%d 项跳过 ===%b\n' "$BLUE" "$FAILURES" "$WARNINGS" "$PLAIN"
+if [ "$FAILURES" -gt 0 ]; then
+    exit 1
+fi
